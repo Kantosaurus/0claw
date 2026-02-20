@@ -91,8 +91,18 @@ struct NativeFunctionCall {
 }
 
 #[derive(Debug, Deserialize)]
+struct ApiUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct NativeChatResponse {
     choices: Vec<NativeChoice>,
+    #[serde(default)]
+    usage: Option<ApiUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -202,7 +212,10 @@ impl OpenRouterProvider {
             .collect()
     }
 
-    fn parse_native_response(message: NativeResponseMessage) -> ProviderChatResponse {
+    fn parse_native_response(
+        message: NativeResponseMessage,
+        api_usage: Option<ApiUsage>,
+    ) -> ProviderChatResponse {
         let tool_calls = message
             .tool_calls
             .unwrap_or_default()
@@ -214,9 +227,15 @@ impl OpenRouterProvider {
             })
             .collect::<Vec<_>>();
 
+        let usage = api_usage.map(|u| crate::providers::traits::ResponseUsage {
+            input_tokens: u.prompt_tokens,
+            output_tokens: u.completion_tokens,
+        });
+
         ProviderChatResponse {
             text: message.content,
             tool_calls,
+            usage,
         }
     }
 
@@ -387,13 +406,14 @@ impl Provider for OpenRouterProvider {
         }
 
         let native_response: NativeChatResponse = response.json().await?;
+        let api_usage = native_response.usage;
         let message = native_response
             .choices
             .into_iter()
             .next()
             .map(|c| c.message)
             .ok_or_else(|| anyhow::anyhow!("No response from OpenRouter"))?;
-        Ok(Self::parse_native_response(message))
+        Ok(Self::parse_native_response(message, api_usage))
     }
 
     fn supports_native_tools(&self) -> bool {
@@ -475,13 +495,14 @@ impl Provider for OpenRouterProvider {
         }
 
         let native_response: NativeChatResponse = response.json().await?;
+        let api_usage = native_response.usage;
         let message = native_response
             .choices
             .into_iter()
             .next()
             .map(|c| c.message)
             .ok_or_else(|| anyhow::anyhow!("No response from OpenRouter"))?;
-        Ok(Self::parse_native_response(message))
+        Ok(Self::parse_native_response(message, api_usage))
     }
 }
 
@@ -706,7 +727,7 @@ mod tests {
             }]),
         };
 
-        let response = OpenRouterProvider::parse_native_response(message);
+        let response = OpenRouterProvider::parse_native_response(message, None);
 
         assert_eq!(response.text.as_deref(), Some("Here you go."));
         assert_eq!(response.tool_calls.len(), 1);

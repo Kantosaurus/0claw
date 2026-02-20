@@ -235,7 +235,7 @@ impl ProxyConfigTool {
         }
 
         if args.get("enabled").is_none() && touched_proxy_url {
-            proxy.enabled = true;
+            proxy.enabled = proxy.has_any_proxy_url();
         }
 
         proxy.no_proxy = proxy.normalized_no_proxy();

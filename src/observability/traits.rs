@@ -23,6 +23,8 @@ pub enum ObserverEvent {
         duration: Duration,
         success: bool,
         error_message: Option<String>,
+        tokens_in: Option<u64>,
+        tokens_out: Option<u64>,
     },
     AgentEnd {
         provider: String,
@@ -39,6 +41,8 @@ pub enum ObserverEvent {
         tool: String,
         duration: Duration,
         success: bool,
+        arguments_hash: Option<String>,
+        iteration: Option<u32>,
     },
     /// The agent produced a final answer for the current user message.
     TurnComplete,
@@ -142,6 +146,8 @@ mod tests {
             tool: "shell".into(),
             duration: Duration::from_millis(10),
             success: true,
+            arguments_hash: None,
+            iteration: None,
         };
         let metric = ObserverMetric::RequestLatency(Duration::from_millis(8));
 

@@ -132,8 +132,18 @@ struct NativeFunctionCall {
 }
 
 #[derive(Debug, Deserialize)]
+struct ApiUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct ApiChatResponse {
     choices: Vec<Choice>,
+    #[serde(default)]
+    usage: Option<ApiUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -340,6 +350,12 @@ impl CopilotProvider {
         }
 
         let api_response: ApiChatResponse = response.json().await?;
+        let usage = api_response.usage.map(|u| {
+            crate::providers::traits::ResponseUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+            }
+        });
         let choice = api_response
             .choices
             .into_iter()
@@ -363,6 +379,7 @@ impl CopilotProvider {
         Ok(ProviderChatResponse {
             text: choice.message.content,
             tool_calls,
+            usage,
         })
     }
 

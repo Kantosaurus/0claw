@@ -142,6 +142,10 @@ pub struct Config {
     /// Hardware configuration (wizard-driven physical world setup).
     #[serde(default)]
     pub hardware: HardwareConfig,
+
+    /// Research telemetry configuration.
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 // ── Delegate Agents ──────────────────────────────────────────────
@@ -1507,6 +1511,69 @@ impl Default for ObservabilityConfig {
     }
 }
 
+// ── Research Telemetry ────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct TelemetryConfig {
+    /// Master switch for research telemetry. Default: true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Record action-level events (LLM calls, tool executions). Default: true when enabled.
+    #[serde(default = "default_true")]
+    pub actions_enabled: bool,
+
+    /// Record system-level metrics (CPU, memory, network). Default: true when enabled.
+    #[serde(default = "default_true")]
+    pub system_enabled: bool,
+
+    /// System metrics sampling interval in seconds. Default: 1.
+    #[serde(default = "default_system_interval_secs")]
+    pub system_interval_secs: u64,
+
+    /// Enable eBPF syscall tracing (Linux only, requires CAP_BPF). Default: false.
+    #[serde(default)]
+    pub ebpf_enabled: bool,
+
+    /// Compute and cache tool type embeddings. Default: false.
+    #[serde(default)]
+    pub tool_embeddings_enabled: bool,
+
+    /// Maximum telemetry database size in MB. Default: 1024.
+    #[serde(default = "default_max_db_size_mb")]
+    pub max_db_size_mb: u64,
+
+    /// Bounded channel capacity for the writer thread. Default: 100.
+    #[serde(default = "default_buffer_capacity")]
+    pub buffer_capacity: usize,
+}
+
+fn default_system_interval_secs() -> u64 {
+    1
+}
+fn default_max_db_size_mb() -> u64 {
+    1024
+}
+fn default_buffer_capacity() -> usize {
+    100
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            actions_enabled: true,
+            system_enabled: true,
+            system_interval_secs: 1,
+            ebpf_enabled: false,
+            tool_embeddings_enabled: false,
+            max_db_size_mb: 1024,
+            buffer_capacity: 100,
+        }
+    }
+}
+
 // ── Autonomy / Security ──────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -2499,6 +2566,7 @@ impl Default for Config {
             agents: HashMap::new(),
             hardware: HardwareConfig::default(),
             query_classification: QueryClassificationConfig::default(),
+            telemetry: TelemetryConfig::default(),
         }
     }
 }
@@ -3182,7 +3250,7 @@ mod tests {
     }
 
     #[test]
-    fn config_schema_export_contains_expected_contract_shape() {
+    async fn config_schema_export_contains_expected_contract_shape() {
         let schema = schemars::schema_for!(Config);
         let schema_json = serde_json::to_value(&schema).expect("schema should serialize to json");
 
@@ -3396,6 +3464,7 @@ default_temperature = 0.7
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
             hardware: HardwareConfig::default(),
+            telemetry: TelemetryConfig::default(),
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -3495,7 +3564,7 @@ tool_dispatcher = "xml"
         assert_eq!(parsed.agent.tool_dispatcher, "xml");
     }
 
-    #[tokio::test]
+    #[test]
     async fn config_save_and_load_tmpdir() {
         let dir = std::env::temp_dir().join("zeroclaw_test_config");
         let _ = fs::remove_dir_all(&dir).await;
@@ -3536,6 +3605,7 @@ tool_dispatcher = "xml"
             peripherals: PeripheralsConfig::default(),
             agents: HashMap::new(),
             hardware: HardwareConfig::default(),
+            telemetry: TelemetryConfig::default(),
         };
 
         config.save().await.unwrap();
@@ -3556,7 +3626,7 @@ tool_dispatcher = "xml"
         let _ = fs::remove_dir_all(&dir).await;
     }
 
-    #[tokio::test]
+    #[test]
     async fn config_save_encrypts_nested_credentials() {
         let dir = std::env::temp_dir().join(format!(
             "zeroclaw_test_nested_credentials_{}",
@@ -3639,7 +3709,7 @@ tool_dispatcher = "xml"
         let _ = fs::remove_dir_all(&dir).await;
     }
 
-    #[tokio::test]
+    #[test]
     async fn config_save_atomic_cleanup() {
         let dir =
             std::env::temp_dir().join(format!("zeroclaw_test_config_{}", uuid::Uuid::new_v4()));

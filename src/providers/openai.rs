@@ -26,8 +26,18 @@ struct Message {
 }
 
 #[derive(Debug, Deserialize)]
+struct ApiUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
+    #[serde(default)]
+    usage: Option<ApiUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +117,8 @@ struct NativeFunctionCall {
 #[derive(Debug, Deserialize)]
 struct NativeChatResponse {
     choices: Vec<NativeChoice>,
+    #[serde(default)]
+    usage: Option<ApiUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,7 +245,10 @@ impl OpenAiProvider {
             .collect()
     }
 
-    fn parse_native_response(message: NativeResponseMessage) -> ProviderChatResponse {
+    fn parse_native_response(
+        message: NativeResponseMessage,
+        api_usage: Option<ApiUsage>,
+    ) -> ProviderChatResponse {
         let text = message.effective_content();
         let tool_calls = message
             .tool_calls
@@ -246,7 +261,16 @@ impl OpenAiProvider {
             })
             .collect::<Vec<_>>();
 
-        ProviderChatResponse { text, tool_calls }
+        let usage = api_usage.map(|u| crate::providers::traits::ResponseUsage {
+            input_tokens: u.prompt_tokens,
+            output_tokens: u.completion_tokens,
+        });
+
+        ProviderChatResponse {
+            text,
+            tool_calls,
+            usage,
+        }
     }
 
     fn http_client(&self) -> Client {
@@ -341,13 +365,14 @@ impl Provider for OpenAiProvider {
         }
 
         let native_response: NativeChatResponse = response.json().await?;
+        let api_usage = native_response.usage;
         let message = native_response
             .choices
             .into_iter()
             .next()
             .map(|c| c.message)
             .ok_or_else(|| anyhow::anyhow!("No response from OpenAI"))?;
-        Ok(Self::parse_native_response(message))
+        Ok(Self::parse_native_response(message, api_usage))
     }
 
     fn supports_native_tools(&self) -> bool {
@@ -399,13 +424,14 @@ impl Provider for OpenAiProvider {
         }
 
         let native_response: NativeChatResponse = response.json().await?;
+        let api_usage = native_response.usage;
         let message = native_response
             .choices
             .into_iter()
             .next()
             .map(|c| c.message)
             .ok_or_else(|| anyhow::anyhow!("No response from OpenAI"))?;
-        Ok(Self::parse_native_response(message))
+        Ok(Self::parse_native_response(message, api_usage))
     }
 
     async fn warmup(&self) -> anyhow::Result<()> {

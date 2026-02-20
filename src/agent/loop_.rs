@@ -908,6 +908,8 @@ pub(crate) async fn run_tool_call_loop(
                         duration: llm_started_at.elapsed(),
                         success: true,
                         error_message: None,
+                        tokens_in: resp.usage.as_ref().map(|u| u.input_tokens),
+                        tokens_out: resp.usage.as_ref().map(|u| u.output_tokens),
                     });
 
                     let response_text = resp.text_or_empty().to_string();
@@ -946,6 +948,8 @@ pub(crate) async fn run_tool_call_loop(
                         duration: llm_started_at.elapsed(),
                         success: false,
                         error_message: Some(crate::providers::sanitize_api_error(&e.to_string())),
+                        tokens_in: None,
+                        tokens_out: None,
                     });
                     return Err(e);
                 }
@@ -1034,6 +1038,8 @@ pub(crate) async fn run_tool_call_loop(
                             tool: call.name.clone(),
                             duration: start.elapsed(),
                             success: r.success,
+                            arguments_hash: None,
+                            iteration: None,
                         });
                         if r.success {
                             scrub_credentials(&r.output)
@@ -1046,6 +1052,8 @@ pub(crate) async fn run_tool_call_loop(
                             tool: call.name.clone(),
                             duration: start.elapsed(),
                             success: false,
+                            arguments_hash: None,
+                            iteration: None,
                         });
                         format!("Error executing {}: {e}", call.name)
                     }

@@ -283,6 +283,8 @@ pub struct AppState {
     pub linq_signing_secret: Option<Arc<str>>,
     /// Observability backend for metrics scraping
     pub observer: Arc<dyn crate::observability::Observer>,
+    /// Telemetry SQLite store for research data download
+    pub telemetry_store: Option<Arc<crate::telemetry::TelemetrySqliteStore>>,
 }
 
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
@@ -484,6 +486,9 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     }
     println!("  GET  /health    — health check");
     println!("  GET  /metrics   — Prometheus metrics");
+    if config.telemetry.enabled {
+        println!("  GET  /telemetry/download — download research telemetry (Bearer auth)");
+    }
     if let Some(code) = pairing.pairing_code() {
         println!();
         println!("  🔐 PAIRING REQUIRED — use this one-time code:");
@@ -504,6 +509,23 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     let observer: Arc<dyn crate::observability::Observer> =
         Arc::from(crate::observability::create_observer(&config.observability));
 
+    let telemetry_store: Option<Arc<crate::telemetry::TelemetrySqliteStore>> =
+        if config.telemetry.enabled {
+            let telem_dir = config.workspace_dir.join("telemetry");
+            match crate::telemetry::TelemetrySqliteStore::open(
+                &telem_dir,
+                config.telemetry.buffer_capacity,
+            ) {
+                Ok(store) => Some(Arc::new(store)),
+                Err(e) => {
+                    tracing::warn!("Failed to open telemetry store for gateway: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     let state = AppState {
         config: config_state,
         provider,
@@ -521,6 +543,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         linq: linq_channel,
         linq_signing_secret,
         observer,
+        telemetry_store,
     };
 
     // Build router with middleware
@@ -532,6 +555,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/whatsapp", get(handle_whatsapp_verify))
         .route("/whatsapp", post(handle_whatsapp_message))
         .route("/linq", post(handle_linq_webhook))
+        .route("/telemetry/download", get(handle_telemetry_download))
         .with_state(state)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .layer(TimeoutLayer::with_status_code(
@@ -554,6 +578,81 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
 // ══════════════════════════════════════════════════════════════════════════════
 
 /// GET /health — always public (no secrets leaked)
+/// Query parameters for the telemetry download endpoint.
+#[derive(Debug, serde::Deserialize)]
+struct TelemetryDownloadParams {
+    since_epoch_ms: Option<i64>,
+    limit: Option<usize>,
+}
+
+/// GET /telemetry/download — export telemetry data as JSON.
+///
+/// Requires a valid paired bearer token. Returns 404 if telemetry is not enabled.
+async fn handle_telemetry_download(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<TelemetryDownloadParams>,
+) -> impl IntoResponse {
+    // Auth: require paired bearer token
+    if state.pairing.require_pairing() {
+        let token = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        match token {
+            Some(t) if state.pairing.is_authenticated(t) => {}
+            _ => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "unauthorized"})),
+                )
+                    .into_response()
+            }
+        }
+    }
+
+    let store = match &state.telemetry_store {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "telemetry not enabled"})),
+            )
+                .into_response()
+        }
+    };
+
+    let db_path = store.db_path().to_path_buf();
+    let limit = params.limit.unwrap_or(10_000).min(100_000);
+    let since = params.since_epoch_ms;
+
+    // Perform the read-only query on a blocking thread to avoid blocking tokio.
+    let result = tokio::task::spawn_blocking(move || {
+        let reader = crate::telemetry::reader::TelemetryReader::open(&db_path)?;
+        let action_events = reader.export_action_events(since, limit)?;
+        let system_samples = reader.export_system_samples(since, limit)?;
+        Ok::<_, anyhow::Error>(serde_json::json!({
+            "action_events": action_events,
+            "system_samples": system_samples,
+        }))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(json)) => (StatusCode::OK, Json(json)).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
     let body = serde_json::json!({
         "status": "ok",
@@ -801,6 +900,8 @@ async fn handle_webhook(
                     duration,
                     success: true,
                     error_message: None,
+                    tokens_in: None,
+                    tokens_out: None,
                 });
             state.observer.record_metric(
                 &crate::observability::traits::ObserverMetric::RequestLatency(duration),
@@ -830,6 +931,8 @@ async fn handle_webhook(
                     duration,
                     success: false,
                     error_message: Some(sanitized.clone()),
+                    tokens_in: None,
+                    tokens_out: None,
                 });
             state.observer.record_metric(
                 &crate::observability::traits::ObserverMetric::RequestLatency(duration),
@@ -1210,6 +1313,7 @@ mod tests {
             linq: None,
             linq_signing_secret: None,
             observer: Arc::new(crate::observability::NoopObserver),
+            telemetry_store: None,
         };
 
         let response = handle_metrics(State(state)).await.into_response();
@@ -1253,6 +1357,7 @@ mod tests {
             linq: None,
             linq_signing_secret: None,
             observer,
+            telemetry_store: None,
         };
 
         let response = handle_metrics(State(state)).await.into_response();
@@ -1612,6 +1717,7 @@ mod tests {
             linq: None,
             linq_signing_secret: None,
             observer: Arc::new(crate::observability::NoopObserver),
+            telemetry_store: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -1670,6 +1776,7 @@ mod tests {
             linq: None,
             linq_signing_secret: None,
             observer: Arc::new(crate::observability::NoopObserver),
+            telemetry_store: None,
         };
 
         let headers = HeaderMap::new();
@@ -1740,6 +1847,7 @@ mod tests {
             linq: None,
             linq_signing_secret: None,
             observer: Arc::new(crate::observability::NoopObserver),
+            telemetry_store: None,
         };
 
         let response = handle_webhook(
@@ -1782,6 +1890,7 @@ mod tests {
             linq: None,
             linq_signing_secret: None,
             observer: Arc::new(crate::observability::NoopObserver),
+            telemetry_store: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -1829,6 +1938,7 @@ mod tests {
             linq: None,
             linq_signing_secret: None,
             observer: Arc::new(crate::observability::NoopObserver),
+            telemetry_store: None,
         };
 
         let mut headers = HeaderMap::new();

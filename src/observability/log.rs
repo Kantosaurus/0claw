@@ -34,6 +34,7 @@ impl Observer for LogObserver {
                 tool,
                 duration,
                 success,
+                ..
             } => {
                 let ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
                 info!(tool = %tool, duration_ms = ms, success = success, "tool.call");
@@ -68,6 +69,8 @@ impl Observer for LogObserver {
                 duration,
                 success,
                 error_message,
+                tokens_in,
+                tokens_out,
             } => {
                 let ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
                 info!(
@@ -76,6 +79,8 @@ impl Observer for LogObserver {
                     duration_ms = ms,
                     success = success,
                     error = ?error_message,
+                    tokens_in = ?tokens_in,
+                    tokens_out = ?tokens_out,
                     "llm.response"
                 );
             }
@@ -144,6 +149,8 @@ mod tests {
             tool: "shell".into(),
             duration: Duration::from_millis(10),
             success: false,
+            arguments_hash: None,
+            iteration: None,
         });
         obs.record_event(&ObserverEvent::ChannelMessage {
             channel: "telegram".into(),

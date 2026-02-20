@@ -125,9 +125,19 @@ struct SystemBlock {
 }
 
 #[derive(Debug, Deserialize)]
+struct AnthropicUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct NativeChatResponse {
     #[serde(default)]
     content: Vec<NativeContentIn>,
+    #[serde(default)]
+    usage: Option<AnthropicUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -362,6 +372,13 @@ impl AnthropicProvider {
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
 
+        let usage = response.usage.map(|u| {
+            crate::providers::traits::ResponseUsage {
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
+            }
+        });
+
         for block in response.content {
             match block.kind.as_str() {
                 "text" => {
@@ -396,6 +413,7 @@ impl AnthropicProvider {
                 Some(text_parts.join("\n"))
             },
             tool_calls,
+            usage,
         }
     }
 

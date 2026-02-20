@@ -55,6 +55,10 @@ struct Options {
 #[derive(Debug, Deserialize)]
 struct ApiChatResponse {
     message: ResponseMessage,
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+    #[serde(default)]
+    eval_count: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -512,6 +516,14 @@ impl Provider for OllamaProvider {
             )
             .await?;
 
+        let usage = match (response.prompt_eval_count, response.eval_count) {
+            (Some(input), Some(output)) => Some(crate::providers::traits::ResponseUsage {
+                input_tokens: input,
+                output_tokens: output,
+            }),
+            _ => None,
+        };
+
         // Native tool calls returned by the model.
         if !response.message.tool_calls.is_empty() {
             let tool_calls: Vec<ToolCall> = response
@@ -536,7 +548,7 @@ impl Provider for OllamaProvider {
             } else {
                 Some(response.message.content)
             };
-            return Ok(ChatResponse { text, tool_calls });
+            return Ok(ChatResponse { text, tool_calls, usage });
         }
 
         // Plain text response.
@@ -553,6 +565,7 @@ impl Provider for OllamaProvider {
                         if thinking.len() > 200 { &thinking[..200] } else { thinking }
                     )),
                     tool_calls: vec![],
+                    usage,
                 });
             }
             tracing::warn!("Ollama returned empty content with no tool calls");
@@ -560,6 +573,7 @@ impl Provider for OllamaProvider {
         Ok(ChatResponse {
             text: Some(content),
             tool_calls: vec![],
+            usage,
         })
     }
 

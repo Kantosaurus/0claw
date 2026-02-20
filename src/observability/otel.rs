@@ -193,6 +193,8 @@ impl Observer for OtelObserver {
                 duration,
                 success,
                 error_message: _,
+                tokens_in: _,
+                tokens_out: _,
             } => {
                 let secs = duration.as_secs_f64();
                 let attrs = [
@@ -270,6 +272,7 @@ impl Observer for OtelObserver {
                 tool,
                 duration,
                 success,
+                ..
             } => {
                 let secs = duration.as_secs_f64();
                 let start_time = SystemTime::now()
@@ -411,6 +414,8 @@ mod tests {
             duration: Duration::from_millis(250),
             success: true,
             error_message: None,
+            tokens_in: Some(50),
+            tokens_out: Some(100),
         });
         obs.record_event(&ObserverEvent::AgentEnd {
             provider: "openrouter".into(),
@@ -433,11 +438,15 @@ mod tests {
             tool: "shell".into(),
             duration: Duration::from_millis(10),
             success: true,
+            arguments_hash: None,
+            iteration: None,
         });
         obs.record_event(&ObserverEvent::ToolCall {
             tool: "file_read".into(),
             duration: Duration::from_millis(5),
             success: false,
+            arguments_hash: None,
+            iteration: None,
         });
         obs.record_event(&ObserverEvent::TurnComplete);
         obs.record_event(&ObserverEvent::ChannelMessage {
@@ -489,6 +498,8 @@ mod tests {
             duration: Duration::from_millis(0),
             success: false,
             error_message: Some("404 Not Found".into()),
+            tokens_in: None,
+            tokens_out: None,
         });
     }
 

@@ -220,8 +220,24 @@ impl Agent {
     }
 
     pub fn from_config(config: &Config) -> Result<Self> {
-        let observer: Arc<dyn Observer> =
-            Arc::from(observability::create_observer(&config.observability));
+        let base_observer = observability::create_observer(&config.observability);
+        let observer: Arc<dyn Observer> = if config.telemetry.enabled {
+            let telem_dir = config.workspace_dir.join("telemetry");
+            let store = Arc::new(
+                crate::telemetry::TelemetrySqliteStore::open(
+                    &telem_dir,
+                    config.telemetry.buffer_capacity,
+                )?,
+            );
+            let session_id = uuid::Uuid::new_v4().to_string();
+            let telem_obs = crate::telemetry::TelemetryObserver::new(store, session_id);
+            Arc::new(observability::MultiObserver::new(vec![
+                base_observer,
+                Box::new(telem_obs),
+            ]))
+        } else {
+            Arc::from(base_observer)
+        };
         let runtime: Arc<dyn runtime::RuntimeAdapter> =
             Arc::from(runtime::create_runtime(&config.runtime)?);
         let security = Arc::new(SecurityPolicy::from_config(
@@ -353,8 +369,19 @@ impl Agent {
         self.prompt_builder.build(&ctx)
     }
 
-    async fn execute_tool_call(&self, call: &ParsedToolCall) -> ToolExecutionResult {
+    fn compute_arguments_hash(arguments: &serde_json::Value) -> Option<String> {
+        use sha2::Digest;
+        let bytes = serde_json::to_vec(arguments).ok()?;
+        Some(hex::encode(sha2::Sha256::digest(&bytes)))
+    }
+
+    async fn execute_tool_call(
+        &self,
+        call: &ParsedToolCall,
+        iteration: Option<u32>,
+    ) -> ToolExecutionResult {
         let start = Instant::now();
+        let arguments_hash = Self::compute_arguments_hash(&call.arguments);
 
         let result = if let Some(tool) = self.tools.iter().find(|t| t.name() == call.name) {
             match tool.execute(call.arguments.clone()).await {
@@ -363,6 +390,8 @@ impl Agent {
                         tool: call.name.clone(),
                         duration: start.elapsed(),
                         success: r.success,
+                        arguments_hash: arguments_hash.clone(),
+                        iteration,
                     });
                     if r.success {
                         r.output
@@ -375,6 +404,8 @@ impl Agent {
                         tool: call.name.clone(),
                         duration: start.elapsed(),
                         success: false,
+                        arguments_hash: arguments_hash.clone(),
+                        iteration,
                     });
                     format!("Error executing {}: {e}", call.name)
                 }
@@ -391,18 +422,23 @@ impl Agent {
         }
     }
 
-    async fn execute_tools(&self, calls: &[ParsedToolCall]) -> Vec<ToolExecutionResult> {
+    async fn execute_tools(
+        &self,
+        calls: &[ParsedToolCall],
+        iteration: u32,
+    ) -> Vec<ToolExecutionResult> {
+        let iter_val = Some(iteration);
         if !self.config.parallel_tools {
             let mut results = Vec::with_capacity(calls.len());
             for call in calls {
-                results.push(self.execute_tool_call(call).await);
+                results.push(self.execute_tool_call(call, iter_val).await);
             }
             return results;
         }
 
         let mut results = Vec::with_capacity(calls.len());
         for call in calls {
-            results.push(self.execute_tool_call(call).await);
+            results.push(self.execute_tool_call(call, iter_val).await);
         }
         results
     }
@@ -450,8 +486,9 @@ impl Agent {
 
         let effective_model = self.classify_model(user_message);
 
-        for _ in 0..self.config.max_tool_iterations {
+        for iteration in 0..self.config.max_tool_iterations {
             let messages = self.tool_dispatcher.to_provider_messages(&self.history);
+            let llm_start = Instant::now();
             let response = match self
                 .provider
                 .chat(
@@ -468,8 +505,30 @@ impl Agent {
                 )
                 .await
             {
-                Ok(resp) => resp,
-                Err(err) => return Err(err),
+                Ok(resp) => {
+                    self.observer.record_event(&ObserverEvent::LlmResponse {
+                        provider: effective_model.clone(),
+                        model: effective_model.clone(),
+                        duration: llm_start.elapsed(),
+                        success: true,
+                        error_message: None,
+                        tokens_in: resp.usage.as_ref().map(|u| u.input_tokens),
+                        tokens_out: resp.usage.as_ref().map(|u| u.output_tokens),
+                    });
+                    resp
+                }
+                Err(err) => {
+                    self.observer.record_event(&ObserverEvent::LlmResponse {
+                        provider: effective_model.clone(),
+                        model: effective_model.clone(),
+                        duration: llm_start.elapsed(),
+                        success: false,
+                        error_message: Some(err.to_string()),
+                        tokens_in: None,
+                        tokens_out: None,
+                    });
+                    return Err(err);
+                }
             };
 
             let (text, calls) = self.tool_dispatcher.parse_response(&response);
@@ -511,7 +570,9 @@ impl Agent {
                 tool_calls: response.tool_calls.clone(),
             });
 
-            let results = self.execute_tools(&calls).await;
+            let results = self
+                .execute_tools(&calls, u32::try_from(iteration).unwrap_or(u32::MAX))
+                .await;
             let formatted = self.tool_dispatcher.format_results(&results);
             self.history.push(formatted);
             self.trim_history();
@@ -641,6 +702,7 @@ mod tests {
                 return Ok(crate::providers::ChatResponse {
                     text: Some("done".into()),
                     tool_calls: vec![],
+                    usage: None,
                 });
             }
             Ok(guard.remove(0))
@@ -678,6 +740,7 @@ mod tests {
             responses: Mutex::new(vec![crate::providers::ChatResponse {
                 text: Some("hello".into()),
                 tool_calls: vec![],
+                usage: None,
             }]),
         });
 
@@ -715,10 +778,12 @@ mod tests {
                         name: "echo".into(),
                         arguments: "{}".into(),
                     }],
+                    usage: None,
                 },
                 crate::providers::ChatResponse {
                     text: Some("done".into()),
                     tool_calls: vec![],
+                    usage: None,
                 },
             ]),
         });
